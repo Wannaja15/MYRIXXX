@@ -1,10 +1,10 @@
-
 name: MYRIX - Build APK with Logo
 
 on:
-  push:
-    branches: [main, master]
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -14,86 +14,121 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
-          python-version: "3.12"
+          distribution: temurin
+          java-version: "17"
 
-      - name: Install ZIP and image tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip
-          python -m pip install Pillow
-
-      - name: Extract MYRIX project ZIP
+      - name: Find and Extract MYRIX Project
         shell: bash
         run: |
           set -e
 
-          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
-            -maxdepth 1 -type f -iname '*.zip' \
-            -print -quit)
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: ZIP proyek MYRIX tidak ditemukan."
+            echo "ERROR: ZIP proyek MYRIX tidak ditemukan!"
             exit 1
           fi
 
+          echo "Menggunakan proyek: $ZIP_FILE"
           mkdir -p extracted
-          unzip -oq "$ZIP_FILE" -d extracted
+          unzip -q "$ZIP_FILE" -d extracted
 
-          SETTINGS=$(find extracted -type f \
-            \( -name settings.gradle \
-            -o -name settings.gradle.kts \) \
-            -print -quit)
-
-          if [ -z "$SETTINGS" ]; then
-            echo "ERROR: settings.gradle tidak ditemukan dalam ZIP."
-            exit 1
+          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
+            PROJECT_DIR="."
+          else
+            PROJECT_DIR=$(find extracted -type f \
+              \( -name settings.gradle -o -name settings.gradle.kts \) \
+              -print -quit | xargs -r dirname)
           fi
 
-          PROJECT_DIR="$(dirname "$SETTINGS")"
-          PROJECT_DIR="$(realpath "$PROJECT_DIR")"
+          if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR" ]; then
+            echo "ERROR: settings.gradle tidak ditemukan!"
+            exit 1
+          fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Proyek ditemukan: $PROJECT_DIR"
+          echo "Proyek ditemukan di: $PROJECT_DIR"
 
-          if [ -f "$GITHUB_WORKSPACE/myrix-logo.png" ]; then
-            cp "$GITHUB_WORKSPACE/myrix-logo.png" \
-              "$PROJECT_DIR/myrix-logo.png"
-          fi
-
-      - name: Generate MYRIX launcher icons
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Prepare Android SDK
         shell: bash
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          from PIL import Image
+          set -e
 
-          logo_path = Path("myrix-logo.png")
-          if not logo_path.exists():
-              logo_path = Path("app/src/main/assets/logo.png")
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
+            -type f -name sdkmanager 2>/dev/null | head -n 1)
 
-          if not logo_path.exists():
-              print("Logo tidak ditemukan; ikon bawaan dipertahankan.")
-              raise SystemExit(0)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager tidak ditemukan."
+            exit 1
+          fi
 
-          logo = Image.open(logo_path).convert("RGBA")
-          side = max(logo.size)
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
 
-          canvas = Image.new(
-              "RGBA", (side, side), (0, 0, 0, 0)
-          )
-          canvas.alpha_composite(
-              logo,
-              ((side - logo.width) // 2,
-               (side - logo.height) // 2)
-          )
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
+      - name: Install Logo Image Tools
+        run: |
+          python3 -m pip install --user Pillow
+
+      - name: Generate Proper MYRIX Launcher Icons
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          LOGO=""
+
+          for candidate in \
+            "$GITHUB_WORKSPACE/myrix-logo.png" \
+            "$GITHUB_WORKSPACE/extracted/myrix-logo.png" \
+            "$GITHUB_WORKSPACE/extracted/$(basename "$PROJECT_DIR")/myrix-logo.png"
+          do
+            if [ -f "$candidate" ]; then
+              LOGO="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$LOGO" ]; then
+            LOGO=$(find "$GITHUB_WORKSPACE/extracted" \
+              -type f \( -iname "myrix-logo.png" \
+              -o -iname "logo.png" \) -print -quit)
+          fi
+
+          if [ -z "$LOGO" ] || [ ! -f "$LOGO" ]; then
+            echo "ERROR: Logo lama tidak ditemukan."
+            echo "Pastikan myrix-logo.png ada di repositori."
+            exit 1
+          fi
+
+          export LOGO
+
+          python3 - <<'PY'
+          import os
+          from PIL import Image, ImageOps
+
+          logo_path = os.environ["LOGO"]
+          res = "app/src/main/res"
+
+          # Pangkas ruang transparan berlebih agar logo tidak tampak kecil.
+          im = Image.open(logo_path).convert("RGBA")
+          alpha = im.getchannel("A")
+          bbox = alpha.getbbox()
+
+          if bbox:
+              im = im.crop(bbox)
+
+          # Buat ikon legacy dengan logo besar dan latar gelap.
           sizes = {
               "mdpi": 48,
               "hdpi": 72,
@@ -103,127 +138,120 @@ jobs:
           }
 
           for density, size in sizes.items():
-              folder = Path(
-                  f"app/src/main/res/mipmap-{density}"
+              folder = f"{res}/mipmap-{density}"
+              os.makedirs(folder, exist_ok=True)
+
+              canvas = Image.new("RGBA", (size, size), "#171717")
+              fitted = ImageOps.contain(im, (int(size*.84), int(size*.84)))
+              canvas.alpha_composite(
+                  fitted,
+                  ((size-fitted.width)//2, (size-fitted.height)//2)
               )
-              folder.mkdir(parents=True, exist_ok=True)
+              canvas.save(f"{folder}/ic_launcher.png")
 
-              icon = canvas.resize(
-                  (size, size), Image.Resampling.LANCZOS
-              )
-              icon.save(folder / "ic_launcher.png")
-              icon.save(folder / "ic_launcher_round.png")
-
-          print("Ikon MYRIX berhasil dibuat.")
-          PY
-
-      - name: Connect MYRIX logo to app
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          manifest = Path("app/src/main/AndroidManifest.xml")
-          source = manifest.read_text()
-
-          match = re.search(r"<application\b[^>]*>", source)
-          if not match:
-              raise SystemExit(
-                  "ERROR: Tag application tidak ditemukan."
-              )
-
-          tag = match.group(0)
-
-          if "android:icon=" not in tag:
-              tag = tag[:-1] + \
-                  ' android:icon="@mipmap/ic_launcher">'
-
-          if "android:roundIcon=" not in tag:
-              tag = tag[:-1] + \
-                  ' android:roundIcon="@mipmap/ic_launcher_round">'
-
-          source = (
-              source[:match.start()]
-              + tag
-              + source[match.end():]
+          # Ikon adaptif Android: kanvas 108dp, logo berada di safe zone.
+          os.makedirs(f"{res}/drawable-nodpi", exist_ok=True)
+          fg = Image.new("RGBA", (432, 432), (0, 0, 0, 0))
+          fitted = ImageOps.contain(im, (288, 288))
+          fg.alpha_composite(
+              fitted,
+              ((432-fitted.width)//2, (432-fitted.height)//2)
           )
-          manifest.write_text(source)
+          fg.save(f"{res}/drawable-nodpi/ic_launcher_foreground.png")
 
-          print("Konfigurasi ikon MYRIX selesai.")
+          os.makedirs(f"{res}/values", exist_ok=True)
+          with open(f"{res}/values/ic_launcher_background.xml", "w") as f:
+              f.write('''<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="ic_launcher_background">#171717</color>
+          </resources>
+          ''')
+
+          os.makedirs(f"{res}/mipmap-anydpi-v26", exist_ok=True)
+          adaptive = '''<?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+          </adaptive-icon>
+          '''
+
+          for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
+              with open(f"{res}/mipmap-anydpi-v26/{name}", "w") as f:
+                  f.write(adaptive)
+
+          print("Ikon legacy dan adaptive MYRIX berhasil dibuat.")
           PY
 
-      - name: Validate Android project
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Configure App Launcher Icon and Version
         shell: bash
         run: |
           set -e
+          cd "$PROJECT_DIR"
 
-          test -f app/src/main/AndroidManifest.xml
+          python3 - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
 
-          if [ ! -f settings.gradle ] && \
-             [ ! -f settings.gradle.kts ]; then
-            echo "ERROR: settings.gradle tidak ditemukan."
-            exit 1
-          fi
+          path = "app/src/main/AndroidManifest.xml"
 
-          if [ ! -f build.gradle ] && \
-             [ ! -f build.gradle.kts ]; then
-            echo "ERROR: build.gradle tidak ditemukan."
-            exit 1
-          fi
+          if not os.path.isfile(path):
+              raise SystemExit("ERROR: AndroidManifest.xml tidak ditemukan.")
 
-          if [ ! -f app/build.gradle ] && \
-             [ ! -f app/build.gradle.kts ]; then
-            echo "ERROR: app/build.gradle tidak ditemukan."
-            exit 1
-          fi
+          ET.register_namespace(
+              "android",
+              "http://schemas.android.com/apk/res/android"
+          )
+          android = "{http://schemas.android.com/apk/res/android}"
 
-          echo "Struktur proyek lolos pemeriksaan."
+          tree = ET.parse(path)
+          root = tree.getroot()
+          app = root.find("application")
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
+          if app is None:
+              raise SystemExit("ERROR: Tag application tidak ditemukan.")
 
-      - name: Install Android SDK packages
+          app.set(android + "icon", "@mipmap/ic_launcher")
+          app.set(android + "roundIcon", "@mipmap/ic_launcher_round")
+
+          root.set(android + "versionName", "1.1.0")
+          root.set(android + "versionCode", "2")
+
+          tree.write(path, encoding="utf-8", xml_declaration=True)
+          print("Launcher icon dan versi aplikasi diperbarui.")
+          PY
+
+      - name: Validate Android Project
         shell: bash
         run: |
           set -e
+          cd "$PROJECT_DIR"
 
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-          echo "Android SDK: $SDK_ROOT"
-
-          SDKMANAGER=$(find "$SDK_ROOT" \
-            -type f -name sdkmanager 2>/dev/null | head -n 1)
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager tidak ditemukan."
+          if [ ! -f "app/build.gradle" ] && \
+             [ ! -f "app/build.gradle.kts" ]; then
+            echo "ERROR: File Gradle modul app tidak ditemukan."
             exit 1
           fi
 
-          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-
-          "$SDKMANAGER" --install \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.7"
+          echo "Struktur proyek Android ditemukan."
 
       - name: Build MYRIX APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle --no-daemon :app:assembleDebug
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
 
-      - name: Upload APK
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew --no-daemon assembleDebug
+          else
+            gradle --version
+            gradle --no-daemon assembleDebug
+          fi
+
+      - name: Upload MYRIX APK
         uses: actions/upload-artifact@v4
         with:
-          name: MYRIX-APK
+          name: MYRIX-1.1.0-APK
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
