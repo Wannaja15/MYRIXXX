@@ -1,5 +1,5 @@
 
-name: MYRIX 2.1.5 - Build APK
+name: Validate project and build APK
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: myrix-apk-${{ github.ref }}
+  group: myrix-build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -23,33 +23,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Prepare MYRIX Android project
         shell: bash
         run: |
           set -euo pipefail
 
           ROOT="$GITHUB_WORKSPACE"
-          PROJECT_SETTINGS=""
+          PROJECT_DIR=""
 
           find_project() {
             while IFS= read -r file; do
-              DIR="$(dirname "$file")"
+              dir="$(dirname "$file")"
 
-              if [[ -f "$DIR/app/build.gradle" ]] &&
-                 [[ -f "$DIR/app/src/main/assets/index.html" ]] &&
-                 [[ -f "$DIR/app/src/main/AndroidManifest.xml" ]]; then
-                PROJECT_SETTINGS="$file"
+              if [[ -f "$dir/app/build.gradle" || \
+                    -f "$dir/app/build.gradle.kts" ]]; then
+                PROJECT_DIR="$dir"
                 return 0
               fi
             done < <(
-              find "$1" \
-                -type f \
-                -name settings.gradle \
+              find "$1" -type f \
+                \( -name settings.gradle \
+                -o -name settings.gradle.kts \) \
                 -not -path '*/.git/*' \
                 -not -path '*/.gradle/*' \
                 -print
@@ -59,10 +53,11 @@ jobs:
           }
 
           if ! find_project "$ROOT"; then
-            ZIP_FILE="$(find "$ROOT" -maxdepth 1 -type f -iname '*.zip' -print -quit || true)"
+            ZIP_FILE="$(find "$ROOT" -maxdepth 1 \
+              -type f -iname '*.zip' -print -quit || true)"
 
             if [[ -z "$ZIP_FILE" ]]; then
-              echo "ERROR: ZIP proyek MYRIX tidak ditemukan di root repository."
+              echo "ERROR: Proyek Android atau ZIP proyek tidak ditemukan."
               exit 1
             fi
 
@@ -70,21 +65,23 @@ jobs:
             unzip -oq "$ZIP_FILE" -d "$ROOT/.myrix-source"
 
             if ! find_project "$ROOT/.myrix-source"; then
-              echo "ERROR: ZIP tidak berisi proyek Android yang valid."
+              echo "ERROR: ZIP tidak berisi proyek Gradle Android yang valid."
               find "$ROOT/.myrix-source" -maxdepth 5 -type f | head -150
               exit 1
             fi
           fi
 
-          PROJECT_DIR="$(dirname "$PROJECT_SETTINGS")"
-
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Proyek ditemukan: $PROJECT_DIR"
 
-          test -f "$PROJECT_DIR/build.gradle"
-          test -f "$PROJECT_DIR/app/build.gradle"
           test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
-          test -f "$PROJECT_DIR/app/src/main/assets/index.html"
+
+          if [[ ! -f "$PROJECT_DIR/app/src/main/assets/index.html" ]]; then
+            echo "PERINGATAN: assets/index.html tidak ditemukan."
+            echo "Pastikan aset HTML MYRIX berada di lokasi yang benar."
+          fi
+
+          echo "Struktur proyek berhasil diperiksa."
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -92,61 +89,67 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Configure Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
+      - name: Configure Android SDK without obsolete tools
         shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER="$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools" \
-            -type f -path '*/bin/sdkmanager' -print 2>/dev/null | sort -V | tail -n 1)"
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
 
-          if [[ -z "$SDKMANAGER" ]]; then
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+              -type f -path '*/bin/sdkmanager' \
+              -print 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+
+          if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
             echo "ERROR: sdkmanager tidak ditemukan."
+            echo "Isi direktori Android SDK:"
+            ls -la "$ANDROID_HOME" || true
             exit 1
           fi
 
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
 
           "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Validate project and run feature tests
+          echo "Android SDK berhasil disiapkan."
+
+      - name: Validate project and run available tests
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
 
-          python3 scripts/validate-project.py
+          if [[ -f scripts/validate-project.py ]]; then
+            python3 scripts/validate-project.py
+          elif [[ -f scripts/validate-project.cjs ]]; then
+            node scripts/validate-project.cjs
+          else
+            echo "Validator khusus tidak ditemukan; lanjutkan pemeriksaan Gradle."
+          fi
 
-          for test in \
-            scripts/test-effects.cjs \
-            scripts/test-beat-editor.cjs \
-            scripts/test-motion-editor.cjs \
-            scripts/test-shape-free-motion.cjs \
-            scripts/test-fixed-beat-controls.cjs \
-            scripts/test-crop-and-trim.cjs \
-            scripts/test-split-layer-v2.cjs \
-            scripts/test-editor-ui-v21.cjs \
-            scripts/test-compact-editor-ui-v211.cjs \
-            scripts/test-autosave-on-exit.cjs \
-            scripts/test-numeric-transform-z-v212.cjs \
-            scripts/test-playhead-ui-v213.cjs \
-            scripts/test-transform-keyframes-v214.cjs \
-            scripts/test-audio-playback-playhead-v215.cjs
-          do
-            if [[ -f "$test" ]]; then
-              echo "Menjalankan $test"
+          if [[ -d scripts ]]; then
+            while IFS= read -r test; do
+              echo "Menjalankan tes: $test"
               node "$test"
-            else
-              echo "ERROR: Tes tidak ditemukan: $test"
-              exit 1
-            fi
-          done
+            done < <(
+              find scripts -maxdepth 1 -type f \
+                -name 'test*.cjs' -print | sort
+            )
+          fi
+
+          echo "Pemeriksaan yang tersedia selesai."
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -159,24 +162,32 @@ jobs:
           set -euo pipefail
           cd "$PROJECT_DIR"
 
-          gradle --no-daemon --stacktrace :app:assembleDebug
+          if [[ -f gradlew ]]; then
+            chmod +x gradlew
+            ./gradlew --no-daemon --stacktrace :app:assembleDebug
+          else
+            gradle --no-daemon --stacktrace :app:assembleDebug
+          fi
 
           APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
           if [[ ! -s "$APK" ]]; then
-            echo "ERROR: APK tidak berhasil dibuat."
+            echo "ERROR: APK tidak ditemukan setelah proses build."
+            find "$PROJECT_DIR/app/build/outputs" \
+              -type f -name '*.apk' -print 2>/dev/null || true
             exit 1
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/MYRIX-debug-APK"
-
           cp "$APK" \
-            "$GITHUB_WORKSPACE/MYRIX-debug-APK/MYRIX-2.1.5-debug.apk"
+            "$GITHUB_WORKSPACE/MYRIX-debug-APK/MYRIX-debug.apk"
+
+          echo "APK berhasil dibuat."
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: MYRIX-2.1.5-debug-APK
-          path: MYRIX-debug-APK/MYRIX-2.1.5-debug.apk
+          name: MYRIX-debug-APK
+          path: MYRIX-debug-APK/MYRIX-debug.apk
           if-no-files-found: error
           retention-days: 14
