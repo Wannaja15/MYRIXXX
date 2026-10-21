@@ -1,0 +1,100 @@
+name: MYRIX APK Build
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Ambil kode MYRIX
+        uses: actions/checkout@v4
+
+      - name: Siapkan Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Siapkan Android
+        uses: android-actions/setup-android@v3
+
+      - name: Pasang Android SDK
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Periksa ZIP MYRIX
+        run: |
+          test -f MYRIX_2_2_0_RELEASE.zip
+
+      - name: Ekstrak proyek
+        run: |
+          mkdir -p source
+          unzip -oq MYRIX_2_2_0_RELEASE.zip -d source
+          find source -name settings.gradle -print
+
+      - name: Cari proyek Android
+        id: project
+        shell: bash
+        run: |
+          PROJECT=""
+          while IFS= read -r FILE; do
+            DIR="$(dirname "$FILE")"
+            if [ -f "$DIR/app/build.gradle" ]; then
+              PROJECT="$DIR"
+              break
+            fi
+          done < <(find source -name settings.gradle)
+
+          if [ -z "$PROJECT" ]; then
+            echo "Proyek Android tidak ditemukan di ZIP."
+            exit 1
+          fi
+
+          echo "dir=$PROJECT" >> "$GITHUB_OUTPUT"
+
+      - name: Siapkan Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build APK
+        run: |
+          cd "${{ steps.project.outputs.dir }}"
+          gradle --no-daemon --stacktrace \
+            :app:assembleDebug
+
+      - name: Periksa hasil APK
+        run: |
+          find source -type f -name "*.apk" -print
+          mkdir -p output
+          APK="$(find source -type f \
+            -path "*/outputs/apk/debug/*.apk" \
+            -print -quit)"
+
+          if [ -z "$APK" ]; then
+            echo "APK gagal dibuat."
+            exit 1
+          fi
+
+          cp "$APK" output/MYRIX-debug.apk
+          sha256sum output/MYRIX-debug.apk \
+            > output/SHA256SUMS.txt
+
+      - name: Simpan APK untuk diunduh
+        uses: actions/upload-artifact@v4
+        with:
+          name: MYRIX-APK
+          path: output/*
+          if-no-files-found: error
+          retention-days: 14
