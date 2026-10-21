@@ -1,1 +1,214 @@
+name: MYRIX 2.2.0 - Full Audit Build
 
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: myrix-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Validate source, icon, features and build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select current MYRIX release before stale repository files
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          RELEASE_ZIP="$ROOT/MYRIX_2_2_0_RELEASE.zip"
+          EXTRACT_DIR="$RUNNER_TEMP/MYRIX_2_2_0_RELEASE_SOURCE"
+          PROJECT_DIR=""
+
+          locate_project() {
+            local search_root="$1"
+            while IFS= read -r settings_file; do
+              local candidate
+              candidate="$(dirname "$settings_file")"
+              if [[ -f "$candidate/app/build.gradle" && \
+                    -f "$candidate/app/src/main/assets/index.html" && \
+                    -f "$candidate/app/src/main/AndroidManifest.xml" ]]; then
+                PROJECT_DIR="$candidate"
+                return 0
+              fi
+            done < <(
+              find "$search_root" -type f \
+                -name settings.gradle \
+                -not -path '*/.git/*' \
+                -not -path '*/.gradle/*' \
+                -print 2>/dev/null
+            )
+            return 1
+          }
+
+          # IMPORTANT: Prefer the explicitly named release ZIP. This prevents
+          # a stale project already checked into the repository from being built.
+          if [[ -f "$RELEASE_ZIP" ]]; then
+            rm -rf "$EXTRACT_DIR"
+            mkdir -p "$EXTRACT_DIR"
+            unzip -oq "$RELEASE_ZIP" -d "$EXTRACT_DIR"
+            if ! locate_project "$EXTRACT_DIR"; then
+              echo "ERROR: $RELEASE_ZIP does not contain a valid Android project."
+              find "$EXTRACT_DIR" -maxdepth 5 -type f | sort | head -150
+              exit 1
+            fi
+            echo "Source selected from canonical release archive: $RELEASE_ZIP"
+          else
+            # Allow direct source uploads, but never silently build an older release.
+            if ! locate_project "$ROOT"; then
+              echo "ERROR: No Android project found and canonical release ZIP is missing."
+              echo "Upload MYRIX_2_2_0_RELEASE.zip to the repository root."
+              exit 1
+            fi
+            if ! grep -Eq "versionName[[:space:]]+'2\.2\.0'" "$PROJECT_DIR/app/build.gradle" || \
+               ! grep -Eq 'versionCode[[:space:]]+15' "$PROJECT_DIR/app/build.gradle"; then
+              echo "ERROR: A stale Android project was found at repository root."
+              echo "Upload MYRIX_2_2_0_RELEASE.zip so this workflow can select the correct release."
+              exit 1
+            fi
+            echo "Source selected from current versioned repository project: $PROJECT_DIR"
+          fi
+
+          test -f "$PROJECT_DIR/settings.gradle"
+          test -f "$PROJECT_DIR/build.gradle"
+          test -f "$PROJECT_DIR/app/build.gradle"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          test -f "$PROJECT_DIR/app/src/main/assets/index.html"
+          test -f "$PROJECT_DIR/app/src/main/assets/logo.png"
+          test -f "$PROJECT_DIR/app/src/main/res/mipmap-mdpi/ic_launcher.png"
+          test -f "$PROJECT_DIR/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
+          test -f "$PROJECT_DIR/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml"
+
+          if [[ -f "$PROJECT_DIR/MYRIX_2_2_0_RELEASE.html" ]]; then
+            cmp "$PROJECT_DIR/MYRIX_2_2_0_RELEASE.html" \
+                "$PROJECT_DIR/app/src/main/assets/index.html"
+          fi
+
+          grep -Eq "versionName[[:space:]]+'2\.2\.0'" "$PROJECT_DIR/app/build.gradle"
+          grep -Eq 'versionCode[[:space:]]+15' "$PROJECT_DIR/app/build.gradle"
+          grep -q 'android:icon="@mipmap/ic_launcher"' "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Resolved project directory: $PROJECT_DIR"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          # Deliberately no Gradle cache here: source location is resolved separately.
+
+      - name: Configure Android SDK without obsolete tools package
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [[ ! -d "$SDK" ]]; then
+            echo "ERROR: Android SDK directory not found: $SDK"
+            exit 1
+          fi
+
+          export ANDROID_HOME="$SDK"
+          export ANDROID_SDK_ROOT="$SDK"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER="$(find "$SDK/cmdline-tools" -type f \
+              -path '*/bin/sdkmanager' -print 2>/dev/null | sort -V | tail -n 1 || true)"
+          fi
+          if [[ -z "$SDKMANAGER" || ! -x "$SDKMANAGER" ]]; then
+            echo "ERROR: sdkmanager was not found."
+            find "$SDK" -maxdepth 5 -type f -name sdkmanager -print || true
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" \
+            'platform-tools' \
+            'platforms;android-35' \
+            'build-tools;35.0.0'
+          echo "Android SDK packages installed; obsolete package 'tools' was not requested."
+
+      - name: Validate source and all available regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          python3 scripts/validate-project.py
+
+          test_count=0
+          while IFS= read -r test_file; do
+            echo "Running $test_file"
+            node "$test_file"
+            test_count=$((test_count + 1))
+          done < <(find scripts -maxdepth 1 -type f -name 'test*.cjs' -print | sort)
+
+          if [[ "$test_count" -lt 1 ]]; then
+            echo "ERROR: No regression tests were found."
+            exit 1
+          fi
+          echo "Passed all $test_count discovered regression-test scripts."
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon --stacktrace :app:assembleDebug
+
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          if [[ ! -s "$APK" ]]; then
+            echo "ERROR: debug APK was not produced."
+            find "$PROJECT_DIR/app/build/outputs" -type f -name '*.apk' -print 2>/dev/null || true
+            exit 1
+          fi
+
+          AAPT="${ANDROID_HOME}/build-tools/35.0.0/aapt"
+          if [[ ! -x "$AAPT" ]]; then
+            echo "ERROR: aapt was not installed with Android build-tools."
+            exit 1
+          fi
+          "$AAPT" dump badging "$APK" > "$RUNNER_TEMP/myrix-apk-badging.txt"
+          grep -q "package: name='com.myrix.editor'" "$RUNNER_TEMP/myrix-apk-badging.txt"
+          grep -q "application-label:'MYRIX'" "$RUNNER_TEMP/myrix-apk-badging.txt"
+          grep -q 'application-icon' "$RUNNER_TEMP/myrix-apk-badging.txt"
+          grep -q "versionName='2.2.0'" "$RUNNER_TEMP/myrix-apk-badging.txt"
+          cat "$RUNNER_TEMP/myrix-apk-badging.txt"
+
+          mkdir -p "$GITHUB_WORKSPACE/MYRIX-debug-APK"
+          cp "$APK" "$GITHUB_WORKSPACE/MYRIX-debug-APK/MYRIX-2.2.0-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/MYRIX-debug-APK/MYRIX-2.2.0-debug.apk" \
+            > "$GITHUB_WORKSPACE/MYRIX-debug-APK/SHA256SUMS.txt"
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MYRIX-2.2.0-debug-APK
+          path: MYRIX-debug-APK/*
+          if-no-files-found: error
+          retention-days: 14
