@@ -1,4 +1,5 @@
-name: MYRIX 2.2.0 - Full Audit Build
+
+name: MYRIX 2.2.2 - Video & Template Build
 
 on:
   push:
@@ -27,8 +28,8 @@ jobs:
         run: |
           set -euo pipefail
           ROOT="$GITHUB_WORKSPACE"
-          RELEASE_ZIP="$ROOT/MYRIX_2_2_0_RELEASE.zip"
-          EXTRACT_DIR="$RUNNER_TEMP/MYRIX_2_2_0_RELEASE_SOURCE"
+          RELEASE_ZIP="$ROOT/MYRIX_2_2_2_RELEASE.zip"
+          EXTRACT_DIR="$RUNNER_TEMP/MYRIX_2_2_2_RELEASE_SOURCE"
           PROJECT_DIR=""
 
           locate_project() {
@@ -52,32 +53,29 @@ jobs:
             return 1
           }
 
-          # IMPORTANT: Prefer the explicitly named release ZIP. This prevents
-          # a stale project already checked into the repository from being built.
           if [[ -f "$RELEASE_ZIP" ]]; then
             rm -rf "$EXTRACT_DIR"
             mkdir -p "$EXTRACT_DIR"
             unzip -oq "$RELEASE_ZIP" -d "$EXTRACT_DIR"
             if ! locate_project "$EXTRACT_DIR"; then
-              echo "ERROR: $RELEASE_ZIP does not contain a valid Android project."
+              echo "ERROR: Release ZIP does not contain a valid Android project."
               find "$EXTRACT_DIR" -maxdepth 5 -type f | sort | head -150
               exit 1
             fi
-            echo "Source selected from canonical release archive: $RELEASE_ZIP"
+            echo "Source selected from release archive: $RELEASE_ZIP"
           else
-            # Allow direct source uploads, but never silently build an older release.
             if ! locate_project "$ROOT"; then
-              echo "ERROR: No Android project found and canonical release ZIP is missing."
-              echo "Upload MYRIX_2_2_0_RELEASE.zip to the repository root."
+              echo "ERROR: Android project not found."
+              echo "Upload MYRIX_2_2_2_RELEASE.zip to the repository root."
               exit 1
             fi
-            if ! grep -Eq "versionName[[:space:]]+'2\.2\.0'" "$PROJECT_DIR/app/build.gradle" || \
-               ! grep -Eq 'versionCode[[:space:]]+15' "$PROJECT_DIR/app/build.gradle"; then
-              echo "ERROR: A stale Android project was found at repository root."
-              echo "Upload MYRIX_2_2_0_RELEASE.zip so this workflow can select the correct release."
+            if ! grep -Eq "versionName[[:space:]]+'2\.2\.2'" "$PROJECT_DIR/app/build.gradle" || \
+               ! grep -Eq 'versionCode[[:space:]]+17' "$PROJECT_DIR/app/build.gradle"; then
+              echo "ERROR: A stale Android project was found."
+              echo "Upload MYRIX_2_2_2_RELEASE.zip to the repository root."
               exit 1
             fi
-            echo "Source selected from current versioned repository project: $PROJECT_DIR"
+            echo "Source selected from versioned repository project: $PROJECT_DIR"
           fi
 
           test -f "$PROJECT_DIR/settings.gradle"
@@ -90,13 +88,13 @@ jobs:
           test -f "$PROJECT_DIR/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
           test -f "$PROJECT_DIR/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml"
 
-          if [[ -f "$PROJECT_DIR/MYRIX_2_2_0_RELEASE.html" ]]; then
-            cmp "$PROJECT_DIR/MYRIX_2_2_0_RELEASE.html" \
+          if [[ -f "$PROJECT_DIR/MYRIX_2_2_2_RELEASE.html" ]]; then
+            cmp "$PROJECT_DIR/MYRIX_2_2_2_RELEASE.html" \
                 "$PROJECT_DIR/app/src/main/assets/index.html"
           fi
 
-          grep -Eq "versionName[[:space:]]+'2\.2\.0'" "$PROJECT_DIR/app/build.gradle"
-          grep -Eq 'versionCode[[:space:]]+15' "$PROJECT_DIR/app/build.gradle"
+          grep -Eq "versionName[[:space:]]+'2\.2\.2'" "$PROJECT_DIR/app/build.gradle"
+          grep -Eq 'versionCode[[:space:]]+17' "$PROJECT_DIR/app/build.gradle"
           grep -q 'android:icon="@mipmap/ic_launcher"' "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
           grep -q 'android:roundIcon="@mipmap/ic_launcher_round"' "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
 
@@ -113,9 +111,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-          # Deliberately no Gradle cache here: source location is resolved separately.
 
-      - name: Configure Android SDK without obsolete tools package
+      - name: Configure Android SDK
         shell: bash
         run: |
           set -euo pipefail
@@ -147,9 +144,9 @@ jobs:
             'platform-tools' \
             'platforms;android-35' \
             'build-tools;35.0.0'
-          echo "Android SDK packages installed; obsolete package 'tools' was not requested."
+          echo "Android SDK packages installed."
 
-      - name: Validate source and all available regression tests
+      - name: Validate source and regression tests
         shell: bash
         run: |
           set -euo pipefail
@@ -190,25 +187,26 @@ jobs:
 
           AAPT="${ANDROID_HOME}/build-tools/35.0.0/aapt"
           if [[ ! -x "$AAPT" ]]; then
-            echo "ERROR: aapt was not installed with Android build-tools."
+            echo "ERROR: aapt was not installed."
             exit 1
           fi
+
           "$AAPT" dump badging "$APK" > "$RUNNER_TEMP/myrix-apk-badging.txt"
           grep -q "package: name='com.myrix.editor'" "$RUNNER_TEMP/myrix-apk-badging.txt"
           grep -q "application-label:'MYRIX'" "$RUNNER_TEMP/myrix-apk-badging.txt"
           grep -q 'application-icon' "$RUNNER_TEMP/myrix-apk-badging.txt"
-          grep -q "versionName='2.2.0'" "$RUNNER_TEMP/myrix-apk-badging.txt"
+          grep -q "versionName='2.2.2'" "$RUNNER_TEMP/myrix-apk-badging.txt"
           cat "$RUNNER_TEMP/myrix-apk-badging.txt"
 
           mkdir -p "$GITHUB_WORKSPACE/MYRIX-debug-APK"
-          cp "$APK" "$GITHUB_WORKSPACE/MYRIX-debug-APK/MYRIX-2.2.0-debug.apk"
-          sha256sum "$GITHUB_WORKSPACE/MYRIX-debug-APK/MYRIX-2.2.0-debug.apk" \
+          cp "$APK" "$GITHUB_WORKSPACE/MYRIX-debug-APK/MYRIX-2.2.2-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/MYRIX-debug-APK/MYRIX-2.2.2-debug.apk" \
             > "$GITHUB_WORKSPACE/MYRIX-debug-APK/SHA256SUMS.txt"
 
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MYRIX-2.2.0-debug-APK
+          name: MYRIX-2.2.2-debug-APK
           path: MYRIX-debug-APK/*
           if-no-files-found: error
           retention-days: 14
